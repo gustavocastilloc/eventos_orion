@@ -5,7 +5,7 @@ import re
 
 # Constantes
 ARCHIVO_ENTRADA = "files/Report_Testing_orion_ggcas.xlsx"
-ARCHIVO_SALIDA = "files/Reporte_eventos.xlsx"
+ARCHIVO_SALIDA = "files/Reporte_Incidentes_Enlaces.xlsx"
 PROVEEDORES_VALIDOS = ['telconet', 'puntonet', 'cnt', 'movistar', 'cirion', 'claro', 'newaccess']
 
 def cargar_datos(ruta_archivo):
@@ -177,15 +177,27 @@ def generar_hojas_madrugada(df, escritor, fecha_inicio_usuario, fecha_fin_usuari
             registros.to_excel(escritor, sheet_name=nombre_hoja[:31], index=False)
 
 
+def generar_hojas_dia(df, escritor, fecha_inicio, fecha_fin):
+    """
+    Crea hojas en el Excel con registros del día (08h00 a 20h00) por cada fecha entre fecha_inicio y fecha_fin.
+    """
+    fecha_actual = fecha_inicio
 
-# ---------------------- MAIN ----------------------
+    while fecha_actual <= fecha_fin:
+        inicio_dia = datetime.combine(fecha_actual, datetime.min.time()) + timedelta(hours=8)
+        fin_dia = datetime.combine(fecha_actual, datetime.min.time()) + timedelta(hours=20)
 
-def main():
-    df = cargar_datos(ARCHIVO_ENTRADA)
-    df_limpio = preprocesar_datos(df)
-    df_eventos = analizar_eventos(df_limpio)
-    df_corregido = corregir_estados_reboot(df_eventos)
+        registros = df[
+            (df['Fecha Down'] >= inicio_dia) & (df['Fecha Down'] < fin_dia)
+        ]
 
+        if not registros.empty:
+            nombre_hoja = f"{fecha_actual.day:02d}_dia"
+            registros.to_excel(escritor, sheet_name=nombre_hoja[:31], index=False)
+
+        fecha_actual += timedelta(days=1)
+
+def rango_reporte_madrugada(df_corregido):
     # 🗓️ Pedir fechas al usuario
     fecha_inicio_str = input("📅 Ingresa la fecha de inicio (dd/mm/yyyy): ")
     fecha_fin_str = input("📅 Ingresa la fecha de fin (dd/mm/yyyy): ")
@@ -198,3 +210,40 @@ def main():
         generar_hojas_madrugada(df_corregido, writer, fecha_inicio, fecha_fin)
 
     print(f"✅ Archivo generado exitosamente: {ARCHIVO_SALIDA}")
+def rango_reporte_dia(df_corregido):
+    # 🗓️ Pedir fechas al usuario
+    fecha_inicio_str = input("📅 Ingresa la fecha de inicio (dd/mm/yyyy): ")
+    fecha_fin_str = input("📅 Ingresa la fecha de fin (dd/mm/yyyy): ")
+
+    fecha_inicio = datetime.strptime(fecha_inicio_str, "%d/%m/%Y")
+    fecha_fin = datetime.strptime(fecha_fin_str, "%d/%m/%Y")
+
+    with pd.ExcelWriter(ARCHIVO_SALIDA, engine='xlsxwriter') as writer:
+        df_corregido.to_excel(writer, sheet_name='Incidentes Total', index=False)
+        generar_hojas_dia(df_corregido, writer, fecha_inicio, fecha_fin)
+
+    print(f"✅ Archivo generado exitosamente: {ARCHIVO_SALIDA}")
+# ---------------------- MAIN ----------------------
+def procesando_datos():
+    df = cargar_datos(ARCHIVO_ENTRADA)
+    df_limpio = preprocesar_datos(df)
+    df_eventos = analizar_eventos(df_limpio)
+    df_corregido = corregir_estados_reboot(df_eventos)
+    print(":::: Se ha procesado los datos ::::")
+    return df_corregido
+def main():
+    flag=True
+    while flag:
+        print("1.- Reporte madrugada")
+        print("2.- Reporte del dìa")
+        print("3.- Salir")
+        opcion=input("Seleccionar una opcion: ")
+        if opcion=="1":
+            rango_reporte_madrugada(procesando_datos())
+        elif opcion=="2":
+            rango_reporte_dia(procesando_datos())
+        elif opcion=="3":
+            flag=False
+    
+if __name__ == "__main__":
+    main()
