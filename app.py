@@ -1,19 +1,21 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
-
+from datetime import timedelta
 # Constantes
 ARCHIVO_ENTRADA = "files/Report_Testing_orion_ggcas.xlsx"
-ARCHIVO_SALIDA = "files/Reporte_Incidentes_Enlaces.xlsx"
+ARCHIVO_SALIDA = "files/Reporte_eventos.xlsx"
 PROVEEDORES_VALIDOS = ['telconet', 'puntonet', 'cnt', 'movistar', 'cirion', 'claro', 'newaccess']
 
 def cargar_datos(ruta_archivo):
+    # Cargar el archivo y eliminar las dos primeras filas
     df = pd.read_excel(ruta_archivo, skiprows=2)
+
+    # Ajustar la hora (restar 5 horas para zona horaria)
     df["EventTime"] = pd.to_datetime(df["EventTime"], errors='coerce') - timedelta(hours=5)
     df["EventTime"] = df["EventTime"].dt.floor('min')
     return df
-
 def extraer_proveedor(enlace):
     for prov in PROVEEDORES_VALIDOS:
         if prov.lower() in enlace.lower():
@@ -21,7 +23,11 @@ def extraer_proveedor(enlace):
     return None
 
 def extraer_agencia_base(message):
-    frases_clave = ['has stopped responding', 'rebooted', 'is responding again']
+    frases_clave = [
+        'has stopped responding',
+        'rebooted',
+        'is responding again'
+    ]
     mensaje_limpio = message
     for frase in frases_clave:
         if frase in mensaje_limpio.lower():
@@ -31,12 +37,17 @@ def extraer_agencia_base(message):
     return mensaje_limpio.strip()
 
 def preprocesar_datos(df):
+    # Filtrar solo filas con proveedor válido
     df["Proveedor"] = df["Message"].apply(extraer_proveedor)
     df = df[df["Proveedor"].notnull()]
+
+    # Extraer nombre base del enlace
     df["Agencia_base"] = df["Message"].apply(extraer_agencia_base)
+
     return df
 
 def construir_diccionario_reboots(df):
+    """Crea un diccionario con fechas de reboot por agencia, redondeadas al minuto."""
     reboots = {}
     for _, fila in df[df['EventTypeName'].str.lower().str.contains('reboot')].iterrows():
         agencia = fila['Agencia_base']
@@ -45,6 +56,7 @@ def construir_diccionario_reboots(df):
     return reboots
 
 def hay_reboot_cercano(agencia, fecha_up, reboots_por_agencia):
+    """Verifica si hay un reboot dentro de ±2 minutos del evento UP."""
     if agencia not in reboots_por_agencia or pd.isna(fecha_up):
         return False
     fecha_up_red = fecha_up.replace(second=0, microsecond=0)
@@ -58,13 +70,27 @@ def analizar_eventos(df):
     for agencia, grupo in df.groupby('Agencia_base'):
         eventos = grupo.sort_values('EventTime')
         fecha_down = None
-        fecha_up = None
 
         for _, fila in eventos.iterrows():
             evento = str(fila['EventTypeName']).lower()
 
-            if 'down' in evento and fecha_down is None:
-                fecha_down = fila['EventTime']
+            if 'down' in evento:
+                if fecha_down is None:
+                    fecha_down = fila['EventTime']
+                else:
+                    # Ya había una caída sin recuperación, registrarla como caída incompleta
+                    resultado.append({
+                        'Enlace': agencia,
+                        'Fecha Down': fecha_down,
+                        'Fecha Up': None,
+                        'Tiempo': None,
+                        'Estado': 'Caído',
+                        'Agencia_base': fila['Agencia_base'],
+                        'Proveedor': fila['Proveedor']
+                    })
+                    # Ahora actualizamos con la nueva caída
+                    fecha_down = fila['EventTime']
+
             elif 'up' in evento and fecha_down is not None:
                 fecha_up = fila['EventTime']
                 hay_reboot = hay_reboot_cercano(agencia, fecha_up, reboots_por_agencia)
@@ -81,10 +107,10 @@ def analizar_eventos(df):
                     'Proveedor': fila['Proveedor']
                 })
 
-                fecha_down = None
-                fecha_up = None
+                fecha_down = None  # Reiniciar solo si se empareja
 
-        if fecha_down is not None and fecha_up is None:
+        # Si queda una caída sin subida al final
+        if fecha_down is not None:
             resultado.append({
                 'Enlace': agencia,
                 'Fecha Down': fecha_down,
@@ -94,26 +120,33 @@ def analizar_eventos(df):
                 'Agencia_base': grupo.iloc[-1]['Agencia_base'],
                 'Proveedor': grupo.iloc[-1]['Proveedor']
             })
+
     return pd.DataFrame(resultado)
 
 def corregir_estados_reboot(df, time_margin='2min'):
+    # Asegurar que las fechas sean tipo datetime
     df['Fecha Down'] = pd.to_datetime(df['Fecha Down'], errors='coerce')
     df['Fecha Up'] = pd.to_datetime(df['Fecha Up'], errors='coerce')
 
+    # Extraer base de la agencia y proveedor desde el campo 'Enlace'
     df['Agencia_base'] = df['Enlace'].apply(lambda x: ' '.join(x.split()[:-1])
                                             .replace("Principal", "")
                                             .replace("Backup", "")
                                             .strip())
     df['Proveedor'] = df['Enlace'].apply(lambda x: x.split()[-1])
+
     time_margin = pd.Timedelta(time_margin)
     ajustado = df.copy()
 
     for agencia, grupo in df.groupby('Agencia_base'):
+        # Buscar enlaces principales en Reboot
         principales = grupo[(grupo['Estado'] == 'Reboot') & (grupo['Enlace'].str.contains('Principal', case=False))]
 
         for _, principal in principales.iterrows():
             fecha_down_p = principal['Fecha Down']
             fecha_up_p = principal['Fecha Up']
+
+            # Buscar backups del mismo grupo
             backups = grupo[grupo['Enlace'].str.contains('Backup', case=False)]
 
             for idx, backup in backups.iterrows():
@@ -129,6 +162,7 @@ def corregir_estados_reboot(df, time_margin='2min'):
                     if down_match and up_match and backup['Estado'] == 'Caído y recuperado':
                         ajustado.at[idx, 'Estado'] = 'Reboot'
 
+        # Comparación entre diferentes proveedores
         if grupo['Proveedor'].nunique() > 1:
             for i, fila in grupo.iterrows():
                 similares = grupo[
@@ -136,11 +170,13 @@ def corregir_estados_reboot(df, time_margin='2min'):
                     (abs(grupo['Fecha Up'] - fila['Fecha Up']) <= time_margin) &
                     (grupo['Proveedor'] != fila['Proveedor'])
                 ]
+
                 if not similares.empty and 'Reboot' in similares['Estado'].values and fila['Estado'] != 'Reboot':
                     ajustado.at[i, 'Estado'] = 'Reboot'
 
     ajustado.reset_index(drop=True, inplace=True)
     return ajustado
+# ---------------------- MAIN ----------------------
 
 def pedir_rango_fechas():
     inicio_str = input("📅 Ingresa la fecha de inicio (dd/mm/yyyy): ")
@@ -180,41 +216,7 @@ def generar_hojas_madrugada_con_fines_semana(df,escritor,fecha_inicio_usuario,fe
     fecha_inicio_usuario = fecha_inicio_usuario.replace(hour=0,minute=0,second=0,microsecond=0)
     fecha_fin_usuario = fecha_fin_usuario.replace(hour=0,minute=0,second=0,microsecond=0)
 
-    fechas_validas = df[(df['Fecha Down'].notnull()) & (df['Fecha Down'].dt.date >= fecha_inicio_usuario.date()) & (df['Fecha Down'].dt.date <=fecha_fin_usuario.date())]['Fecha Down'].dt.date.unique()
-    fechas_validas = sorted(fechas_validas)
-    for fecha in fechas_validas:
-        inicio_madrugada = datetime.combine(fecha, datetime.min.time())+ timedelta(hours=20)
-        fin_madrugada = inicio_madrugada + timedelta(hours=12)
-        nombre_hoja = f"{fecha.strftime('%d')}-{(fecha + timedelta(days=1)).strftime('%d')}_Madrugada"
-
-        registros = df[
-            ((df['Fecha Down'] >= inicio_madrugada) & (df['Fecha Down']< fin_madrugada)) | 
-            ((df['Fecha Up'] >= inicio_madrugada) & (df['Fecha Up'] < fin_madrugada))
-        ]
-        if not registros.empty:
-            registros.to_excel(escritor, sheet_name=nombre_hoja[:31],index=False)
-        # Sábado
-        if fecha.weekday() == 5:
-            inicio_sabado = datetime.combine(fecha, datetime.min.time()) + timedelta(hours=8)
-            fin_sabado = inicio_sabado + timedelta(hours=12)
-            registros_sabado = df[
-                ((df['Fecha Down'] >= inicio_sabado) & (df['Fecha Down'] < fin_sabado)) |
-                ((df['Fecha Up'] >= inicio_sabado) & (df['Fecha Up'] < fin_sabado))
-            ]
-            if not registros_sabado.empty:
-                registros_sabado.to_excel(escritor, sheet_name=f"{fecha.strftime('%d')}_Sabado_Matutino", index=False)
-
-        # Domingo
-        if fecha.weekday() == 6:
-            inicio_domingo = datetime.combine(fecha, datetime.min.time()) + timedelta(hours=8)
-            fin_domingo = inicio_domingo + timedelta(hours=12)
-            registros_domingo = df[
-                ((df['Fecha Down'] >= inicio_domingo) & (df['Fecha Down'] < fin_domingo)) |
-                ((df['Fecha Up'] >= inicio_domingo) & (df['Fecha Up'] < fin_domingo))
-            ]
-            if not registros_domingo.empty:
-                registros_domingo.to_excel(escritor, sheet_name=f"{fecha.strftime('%d')}_Domingo_Matutino", index=False)
-
+    
 def generar_hojas_dia(df, escritor, fecha_inicio, fecha_fin):
     """
     Crea hojas en el Excel con registros del día (08h00 a 20h00) por cada fecha entre fecha_inicio y fecha_fin.
@@ -243,7 +245,7 @@ def rango_reporte_madrugada(df_corregido):
     fecha_inicio = datetime.strptime(fecha_inicio_str, "%d/%m/%Y")
     fecha_fin = datetime.strptime(fecha_fin_str, "%d/%m/%Y")
 
-    with pd.ExcelWriter(ARCHIVO_SALIDA, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter("files/Reporte_Incidentes_Madrugada.xlsx", engine='xlsxwriter') as writer:
         df_corregido.to_excel(writer, sheet_name='Incidentes Total', index=False)
         generar_hojas_madrugada(df_corregido, writer, fecha_inicio, fecha_fin)
 def rango_reporte_madrugada_standby(df_corregido):
@@ -267,7 +269,7 @@ def rango_reporte_dia(df_corregido):
     fecha_inicio = datetime.strptime(fecha_inicio_str, "%d/%m/%Y")
     fecha_fin = datetime.strptime(fecha_fin_str, "%d/%m/%Y")
 
-    with pd.ExcelWriter(ARCHIVO_SALIDA, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter("files/Reporte_Incidentes_Dia.xlsx", engine='xlsxwriter') as writer:
         df_corregido.to_excel(writer, sheet_name='Incidentes Total', index=False)
         generar_hojas_dia(df_corregido, writer, fecha_inicio, fecha_fin)
 
