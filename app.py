@@ -185,33 +185,6 @@ def pedir_rango_fechas():
     fin = datetime.strptime(fin_str, "%d/%m/%Y")
     return inicio, fin
 
-def generar_hojas_madrugada(df, escritor, fecha_inicio_usuario, fecha_fin_usuario):
-    # Convertimos a datetime sin hora para comparar solo la parte de fecha
-    fecha_inicio_usuario = fecha_inicio_usuario.replace(hour=0, minute=0, second=0, microsecond=0)
-    fecha_fin_usuario = fecha_fin_usuario.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # Filtrar solo registros con Fecha Down dentro del rango solicitado
-    fechas_validas = df[
-        (df['Fecha Down'].notnull()) &
-        (df['Fecha Down'].dt.date >= fecha_inicio_usuario.date()) &
-        (df['Fecha Down'].dt.date <= fecha_fin_usuario.date())
-    ]['Fecha Down'].dt.date.unique()
-
-    fechas_validas = sorted(fechas_validas)
-
-    for fecha in fechas_validas:
-        inicio_madrugada = datetime.combine(fecha, datetime.min.time()) + timedelta(hours=20)
-        fin_madrugada = inicio_madrugada + timedelta(hours=12)
-        nombre_hoja = f"{fecha.strftime('%d')}-{(fecha + timedelta(days=1)).strftime('%d')}_Madrugada"
-
-        registros = df[
-            ((df['Fecha Down'] >= inicio_madrugada) & (df['Fecha Down'] < fin_madrugada)) |
-            ((df['Fecha Up'] >= inicio_madrugada) & (df['Fecha Up'] < fin_madrugada))
-        ]
-
-        if not registros.empty:
-            registros.to_excel(escritor, sheet_name=nombre_hoja[:31], index=False)
-
 def generar_hojas_madrugada_con_fines_semana(df,escritor,fecha_inicio_usuario,fecha_fin_usuario):
     fecha_inicio_usuario = fecha_inicio_usuario.replace(hour=0,minute=0,second=0,microsecond=0)
     fecha_fin_usuario = fecha_fin_usuario.replace(hour=0,minute=0,second=0,microsecond=0)
@@ -229,14 +202,34 @@ def generar_hojas_dia(df, escritor, fecha_inicio, fecha_fin):
 
         registros = df[
             (df['Fecha Down'] >= inicio_dia) & (df['Fecha Down'] < fin_dia)
-        ]
+        ].sort_values(by='Fecha Down')
 
         if not registros.empty:
             nombre_hoja = f"{fecha_actual.day:02d}_dia"
             registros.to_excel(escritor, sheet_name=nombre_hoja[:31], index=False)
 
         fecha_actual += timedelta(days=1)
+def generar_hojas_madrugada(df, escritor, fecha_inicio, fecha_fin):
+    """
+    Crea hojas en el Excel con registros nocturnos:
+    Desde las 20h00 del día actual hasta las 08h00 del día siguiente.
+    """
+    fecha_actual = fecha_inicio
 
+    while fecha_actual <= fecha_fin:
+        inicio_madrugada = datetime.combine(fecha_actual, datetime.min.time()) + timedelta(hours=20)
+        fin_madrugada = inicio_madrugada + timedelta(hours=12)  # hasta 08h00 del día siguiente
+
+        registros = df[
+            ((df['Fecha Down'] >= inicio_madrugada) & (df['Fecha Down'] < fin_madrugada))
+        ].sort_values(by='Fecha Down')
+
+        if not registros.empty:
+            nombre_hoja = f"{fecha_actual.strftime('%d')}-{(fecha_actual + timedelta(days=1)).strftime('%d')}_Madrugada"
+            registros.to_excel(escritor, sheet_name=nombre_hoja[:31], index=False)
+
+        fecha_actual += timedelta(days=1)
+        
 def rango_reporte_madrugada(df_corregido):
     # 🗓️ Pedir fechas al usuario
     fecha_inicio_str = input("📅 Ingresa la fecha de inicio (dd/mm/yyyy): ")
@@ -244,10 +237,11 @@ def rango_reporte_madrugada(df_corregido):
 
     fecha_inicio = datetime.strptime(fecha_inicio_str, "%d/%m/%Y")
     fecha_fin = datetime.strptime(fecha_fin_str, "%d/%m/%Y")
-
-    with pd.ExcelWriter("files/Reporte_Incidentes_Madrugada.xlsx", engine='xlsxwriter') as writer:
+    nombre_archivo = f"files/{fecha_inicio.strftime('%Y%m%d')}_{fecha_fin.strftime('%Y%m%d')}_Madrugada.xlsx"
+    with pd.ExcelWriter(nombre_archivo, engine='xlsxwriter') as writer:
         df_corregido.to_excel(writer, sheet_name='Incidentes Total', index=False)
         generar_hojas_madrugada(df_corregido, writer, fecha_inicio, fecha_fin)
+    print(f"✅ Archivo generado exitosamente: {nombre_archivo}")
 def rango_reporte_madrugada_standby(df_corregido):
     # 🗓️ Pedir fechas al usuario
     fecha_inicio_str = input("📅 Ingresa la fecha de inicio (dd/mm/yyyy): ")
@@ -268,12 +262,12 @@ def rango_reporte_dia(df_corregido):
 
     fecha_inicio = datetime.strptime(fecha_inicio_str, "%d/%m/%Y")
     fecha_fin = datetime.strptime(fecha_fin_str, "%d/%m/%Y")
-
-    with pd.ExcelWriter("files/Reporte_Incidentes_Dia.xlsx", engine='xlsxwriter') as writer:
+    nombre_archivo = f"files/{fecha_inicio.strftime('%Y%m%d')}_{fecha_fin.strftime('%Y%m%d')}_Dia.xlsx"
+    with pd.ExcelWriter(nombre_archivo, engine='xlsxwriter') as writer:
         df_corregido.to_excel(writer, sheet_name='Incidentes Total', index=False)
         generar_hojas_dia(df_corregido, writer, fecha_inicio, fecha_fin)
 
-    print(f"✅ Archivo generado exitosamente: {ARCHIVO_SALIDA}")
+    print(f"✅ Archivo generado exitosamente: {nombre_archivo}")
 # ---------------------- MAIN ----------------------
 def procesando_datos():
     df = cargar_datos(ARCHIVO_ENTRADA)
@@ -295,7 +289,7 @@ def main():
         elif opcion=="2":
             rango_reporte_dia(procesando_datos())
         elif opcion=="3":
-            rango_reporte_madrugada_standby(procesando_datos())
+            print("En mantenimiento")
         elif opcion=="4":
             flag=False
     
